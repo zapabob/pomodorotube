@@ -26,6 +26,7 @@ Pomodoro TubeはPythonで作られたポモドーロタイマーアプリケー�
 2. 必要なパッケージをインストールします：
 
 pip install selenium pytube pyperclip
+
 3. ChromeDriverをダウンロードし、PATHに追加するか、スクリプトと同じディレクトリに配置します。
 
 ## 使用方法
