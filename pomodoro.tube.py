@@ -13,6 +13,8 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
+import pyperclip
+import winsound
 
 # ロギングの設定
 logging.basicConfig(
@@ -20,6 +22,10 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
+
+class TimerError(Exception):
+    """タイマー関連のカスタムエラー"""
+    pass
 
 class Timer:
     def __init__(self, duration: int = 25 * 60):
@@ -29,312 +35,245 @@ class Timer:
         self.pause_time: Optional[float] = None
         self.total_pause_time: float = 0
         self.sync_with_video: bool = False
+        self.pomodoro_count: int = 0
+        self.is_break: bool = False
 
-timer = Timer()
-video_thread = None
-driver = None
+    def start(self):
+        if self.is_active:
+            raise TimerError("タイマーは既に動作中です")
+        self.start_time = time.time()
+        self.is_active = True
+        self.total_pause_time = 0
 
-def start_timer():
-    """タイマーを開始する"""
-    try:
-        if timer.is_active:
-            messagebox.showinfo("情報", "タイマーは既に動作中です")
-            return
-        timer.start_time = time.time()
-        timer.is_active = True
-        timer.total_pause_time = 0
-        logging.info("タイマーが開始されました")
-        update_timer()
-    except Exception as e:
-        logging.error(f"タイマー開始エラー: {str(e)}")
-        messagebox.showerror("エラー", "タイマーの開始中にエラーが発生しました")
+    def stop(self):
+        if not self.is_active:
+            raise TimerError("タイマーは動作していません")
+        self.is_active = False
+        self.start_time = None
+        self.pause_time = None
 
-def stop_timer():
-    """タイマーを停止する"""
-    try:
-        if not timer.is_active:
-            messagebox.showinfo("情報", "タイマーは動作していません")
-            return
-        timer.is_active = False
-        timer.start_time = None
-        timer.pause_time = None
-        logging.info("タイマーが停止されました")
-        update_timer()
-    except Exception as e:
-        logging.error(f"タイマー停止エラー: {str(e)}")
-        messagebox.showerror("エラー", "タイマーの停止中にエラーが発生しました")
+    def pause(self):
+        if not self.is_active:
+            raise TimerError("タイマーは動作していません")
+        if self.pause_time:
+            raise TimerError("タイマーは既に一時停止中です")
+        self.pause_time = time.time()
 
-def pause_timer():
-    """タイマーを一時停止する"""
-    try:
-        if not timer.is_active:
-            messagebox.showinfo("情報", "タイマーは動作していません")
-            return
-        if timer.pause_time:
-            messagebox.showinfo("情報", "タイマーは既に一時停止中です")
-            return
-        timer.pause_time = time.time()
-        logging.info("タイマーが一時停止されました")
-        update_timer()
-    except Exception as e:
-        logging.error(f"タイマー一時停止エラー: {str(e)}")
-        messagebox.showerror("エラー", "タイマーの一時停止中にエラーが発生しました")
+    def resume(self):
+        if not self.is_active:
+            raise TimerError("タイマーは動作していません")
+        if not self.pause_time:
+            raise TimerError("タイマーは一時停止されていません")
+        pause_duration = time.time() - self.pause_time
+        self.total_pause_time += pause_duration
+        self.pause_time = None
 
-def resume_timer():
-    """一時停止したタイマーを再開する"""
-    try:
-        if not timer.is_active:
-            messagebox.showinfo("情報", "タイマーは動作していません")
-            return
-        if not timer.pause_time:
-            messagebox.showinfo("情報", "タイマーは一時停止されていません")
-            return
-        pause_duration = time.time() - timer.pause_time
-        timer.total_pause_time += pause_duration
-        timer.pause_time = None
-        logging.info("タイマーが再開されました")
-        update_timer()
-    except Exception as e:
-        logging.error(f"タイマー再開エラー: {str(e)}")
-        messagebox.showerror("エラー", "タイマーの再開中にエラーが発生しました")
+    def get_time_remaining(self) -> float:
+        if not self.is_active:
+            return self.duration
+        elapsed_time = time.time() - self.start_time - self.total_pause_time
+        if self.pause_time:
+            elapsed_time -= time.time() - self.pause_time
+        return max(self.duration - elapsed_time, 0)
 
-def set_timer():
-    """タイマーの時間を設定する"""
-    try:
-        if timer.is_active:
-            messagebox.showinfo("情報", "タイマー動作中は設定を変更できません")
-            return
-        duration = int(duration_entry.get()) * 60
-        if duration <= 0:
-            raise ValueError("タイマーの時間は0より大きい値を設定してください")
-        timer.duration = duration
-        logging.info(f"タイマーが{duration}秒に設定されました")
-        update_timer()
-    except ValueError as ve:
-        logging.error(f"タイマー設定エラー: {str(ve)}")
-        messagebox.showerror("エラー", str(ve))
-    except Exception as e:
-        logging.error(f"タイマー設定エラー: {str(e)}")
-        messagebox.showerror("エラー", "タイマーの設定中にエラーが発生しました")
+class PomodoroApp:
+    def __init__(self, master):
+        self.master = master
+        self.master.title("ポモドーロタイマー")
+        self.master.geometry("500x400")
 
-def extract_video_id(url: str) -> Optional[str]:
-    """YouTubeのURLからビデオIDを抽出する"""
-    youtube_regex = (
-        r'(https?://)?(www\.)?'
-        '(youtube|youtu|youtube-nocookie)\.(com|be)/'
-        '(watch\?v=|embed/|v/|.+\?v=)?([^&=%\?]{11})'
-    )
-    match = re.match(youtube_regex, url)
-    return match.group(6) if match else None
+        self.timer = Timer()
+        self.video_thread = None
+        self.driver = None
 
-def get_youtube_url(video_id: str) -> str:
-    """YouTubeビデオIDから再生可能なURLを取得する"""
-    try:
-        yt = YouTube(f"https://www.youtube.com/watch?v={video_id}")
-        return yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first().url
-    except Exception as e:
-        logging.error(f"YouTube URL取得エラー: {str(e)}")
-        raise Exception("YouTube URLの取得中にエラーが発生しました")
+        self.create_widgets()
 
-def play_youtube_video(url):
-    """Chromiumを使用してYouTube動画を再生する"""
-    global driver
-    try:
-        # Chromiumのオプションを設定
-        chrome_options = Options()
-        chrome_options.add_argument("--autoplay-policy=no-user-gesture-required")
-        
-        # Chromiumドライバーを初期化
-        driver = webdriver.Chrome(options=chrome_options)
-        
-        # YouTubeのURLを開く
-        driver.get(url)
-        
-        # 動画プレーヤーが読み込まれるまで待機
+    def create_widgets(self):
+        style = ttk.Style()
+        style.configure("TButton", padding=6, relief="flat", background="#ccc")
+
+        self.timer_label = ttk.Label(self.master, text="25:00", font=("Helvetica", 48))
+        self.timer_label.pack(pady=20)
+
+        self.button_frame = ttk.Frame(self.master)
+        self.button_frame.pack(pady=10)
+
+        self.start_button = ttk.Button(self.button_frame, text="開始", command=self.start_timer)
+        self.start_button.grid(row=0, column=0, padx=5)
+
+        self.pause_button = ttk.Button(self.button_frame, text="一時停止", command=self.pause_timer, state="disabled")
+        self.pause_button.grid(row=0, column=1, padx=5)
+
+        self.reset_button = ttk.Button(self.button_frame, text="リセット", command=self.reset_timer)
+        self.reset_button.grid(row=0, column=2, padx=5)
+
+        self.url_frame = ttk.Frame(self.master)
+        self.url_frame.pack(pady=10)
+
+        self.url_entry = ttk.Entry(self.url_frame, width=40)
+        self.url_entry.grid(row=0, column=0, padx=5)
+
+        self.paste_button = ttk.Button(self.url_frame, text="ペースト", command=self.paste_url)
+        self.paste_button.grid(row=0, column=1, padx=5)
+
+        self.play_button = ttk.Button(self.url_frame, text="動画再生", command=self.play_video)
+        self.play_button.grid(row=0, column=2, padx=5)
+
+        self.sync_var = tk.BooleanVar()
+        self.sync_checkbox = ttk.Checkbutton(self.master, text="動画と同期", variable=self.sync_var, command=self.toggle_sync_with_video)
+        self.sync_checkbox.pack(pady=5)
+
+    def start_timer(self):
         try:
-            WebDriverWait(driver, 20).until(
+            self.timer.start()
+            logging.info("タイマーが開始されました")
+            self.update_timer()
+            self.start_button.config(state="disabled")
+            self.pause_button.config(state="normal")
+        except TimerError as e:
+            logging.error(f"タイマー開始エラー: {str(e)}")
+            messagebox.showerror("エラー", str(e))
+
+    def pause_timer(self):
+        try:
+            self.timer.pause()
+            logging.info("タイマーが一時停止されました")
+            self.start_button.config(state="normal")
+            self.pause_button.config(state="disabled")
+        except TimerError as e:
+            logging.error(f"タイマー一時停止エラー: {str(e)}")
+            messagebox.showerror("エラー", str(e))
+
+    def reset_timer(self):
+        try:
+            self.timer.stop()
+            self.timer = Timer()
+            logging.info("タイマーがリセットされました")
+            self.update_timer()
+            self.start_button.config(state="normal")
+            self.pause_button.config(state="disabled")
+        except TimerError as e:
+            logging.error(f"タイマーリセットエラー: {str(e)}")
+            messagebox.showerror("エラー", str(e))
+
+    def update_timer(self):
+        remaining_time = self.timer.get_time_remaining()
+        minutes, seconds = divmod(int(remaining_time), 60)
+        self.timer_label.config(text=f"{minutes:02d}:{seconds:02d}")
+        if self.timer.is_active and remaining_time > 0:
+            self.master.after(1000, self.update_timer)
+        elif self.timer.is_active and remaining_time == 0:
+            self.timer.is_active = False
+            self.timer.pomodoro_count += 1
+            self.play_sound()
+            if not self.timer.is_break:
+                messagebox.showinfo("ポモドーロ", "作業時間が終了しました。休憩しましょう！")
+                self.timer.duration = 5 * 60  # 5分休憩
+                self.timer.is_break = True
+            else:
+                messagebox.showinfo("ポモドーロ", "休憩時間が終了しました。作業を再開しましょう！")
+                self.timer.duration = 25 * 60  # 25分作業
+                self.timer.is_break = False
+            self.start_timer()
+
+    def play_sound(self):
+        winsound.PlaySound("SystemHand", winsound.SND_ALIAS)
+
+    def paste_url(self):
+        self.url_entry.delete(0, tk.END)
+        self.url_entry.insert(0, pyperclip.paste())
+
+    def toggle_sync_with_video(self):
+        self.timer.sync_with_video = self.sync_var.get()
+        logging.info(f"動画同期オプションが{'有効' if self.timer.sync_with_video else '無効'}になりました")
+
+    def play_video(self):
+        try:
+            url = self.url_entry.get()
+            video_id = self.extract_video_id(url)
+            if not video_id:
+                raise ValueError("無効なYouTube URLです")
+            video_url = f"https://www.youtube.com/watch?v={video_id}"
+            self.video_thread = threading.Thread(target=self.play_youtube_video, args=(video_url,))
+            self.video_thread.start()
+        except ValueError as ve:
+            logging.error(f"動画再生エラー: {str(ve)}")
+            messagebox.showerror("エラー", str(ve))
+        except Exception as e:
+            logging.error(f"動画再生エラー: {str(e)}")
+            messagebox.showerror("エラー", "動画の再生中にエラーが発生しました")
+
+    def extract_video_id(self, url: str) -> Optional[str]:
+        youtube_regex = (
+            r'(https?://)?(www\.)?'
+            '(youtube|youtu|youtube-nocookie)\.(com|be)/'
+            '(watch\?v=|embed/|v/|.+\?v=)?([^&=%\?]{11})'
+        )
+        match = re.match(youtube_regex, url)
+        return match.group(6) if match else None
+
+    def play_youtube_video(self, url):
+        try:
+            chrome_options = Options()
+            chrome_options.add_argument("--autoplay-policy=no-user-gesture-required")
+            self.driver = webdriver.Chrome(options=chrome_options)
+            self.driver.get(url)
+
+            WebDriverWait(self.driver, 20).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, ".html5-video-player"))
             )
-        except TimeoutException:
-            raise Exception("動画プレーヤーの読み込みに失敗しました")
-        
-        # 再生ボタンをクリック（必要な場合）
+
+            try:
+                play_button = WebDriverWait(self.driver, 10).until(
+                    EC.element_to_be_clickable((By.CSS_SELECTOR, '.ytp-play-button'))
+                )
+                play_button.click()
+            except (TimeoutException, NoSuchElementException):
+                logging.warning("再生ボタンが見つからないか、クリックできません")
+
+            if self.timer.sync_with_video:
+                video_duration = self.get_video_duration()
+                if video_duration:
+                    self.timer.duration = video_duration
+                    self.start_timer()
+
+            logging.info(f"動画が再生されました: {url}")
+
+        except WebDriverException as e:
+            logging.error(f"WebDriverエラー: {str(e)}")
+            messagebox.showerror("エラー", f"ブラウザの操作中にエラーが発生しました: {str(e)}")
+        except Exception as e:
+            logging.error(f"動画再生エラー: {str(e)}")
+            messagebox.showerror("エラー", f"動画の再生中にエラーが発生しました: {str(e)}")
+        finally:
+            if self.driver:
+                self.driver.quit()
+                self.driver = None
+
+    def get_video_duration(self):
         try:
-            play_button = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.CSS_SELECTOR, '.ytp-play-button'))
-            )
-            play_button.click()
-        except (TimeoutException, NoSuchElementException):
-            logging.warning("再生ボタンが見つからないか、クリックできません")
-        
-        # 動画の長さを取得
-        try:
-            video_length_element = WebDriverWait(driver, 10).until(
+            video_length_element = WebDriverWait(self.driver, 10).until(
                 EC.presence_of_element_located((By.CLASS_NAME, "ytp-time-duration"))
             )
             video_length = video_length_element.text
             time_parts = video_length.split(':')
             if len(time_parts) == 2:
                 minutes, seconds = map(int, time_parts)
-                video_duration = minutes * 60 + seconds
+                return minutes * 60 + seconds
             elif len(time_parts) == 3:
                 hours, minutes, seconds = map(int, time_parts)
-                video_duration = hours * 3600 + minutes * 60 + seconds
-            else:
-                raise ValueError("Unexpected time format")
+                return hours * 3600 + minutes * 60 + seconds
         except (TimeoutException, NoSuchElementException, ValueError):
             logging.warning("動画の長さを取得できません")
-            video_duration = None
-        
-        # タイマーを動画の長さに合わせて設定（オプション）
-        if timer.sync_with_video and video_duration:
-            timer.duration = video_duration
-            start_timer()
-        
-        logging.info(f"動画が再生されました: {url}")
-        
-        # 動画が終了するまで待機
-        if video_duration:
-            try:
-                WebDriverWait(driver, video_duration + 30).until(
-                    EC.text_to_be_present_in_element((By.CLASS_NAME, "ytp-time-current"), video_length)
-                )
-            except TimeoutException:
-                logging.warning("動画の終了を検出できませんでした")
-        else:
-            # 動画の長さが不明の場合は、一定時間待機
-            time.sleep(300)  # 5分間待機
-        
-        # 動画が終了したらタイマーも停止（オプション）
-        if timer.sync_with_video:
-            stop_timer()
-        
-    except WebDriverException as e:
-        logging.error(f"WebDriverエラー: {str(e)}")
-        messagebox.showerror("エラー", f"ブラウザの操作中にエラーが発生しました: {str(e)}")
-    except Exception as e:
-        logging.error(f"動画再生エラー: {str(e)}")
-        messagebox.showerror("エラー", f"動画の再生中にエラーが発生しました: {str(e)}")
-    finally:
-        if driver:
-            driver.quit()
-            driver = None
+        return None
 
-def play_video():
-    """YouTubeの動画を再生する"""
-    global video_thread
-    try:
-        url = url_entry.get()
-        video_id = extract_video_id(url)
-        if not video_id:
-            raise ValueError("無効なYouTube URLです")
-        video_url = f"https://www.youtube.com/watch?v={video_id}"
-        video_thread = threading.Thread(target=play_youtube_video, args=(video_url,))
-        video_thread.start()
-    except ValueError as ve:
-        logging.error(f"動画再生エラー: {str(ve)}")
-        messagebox.showerror("エラー", str(ve))
-    except Exception as e:
-        logging.error(f"動画再生エラー: {str(e)}")
-        messagebox.showerror("エラー", "動画の再生中にエラーが発生しました")
+    def on_closing(self):
+        if self.driver:
+            self.driver.quit()
+        self.master.quit()
 
-def update_timer():
-    """タイマーの表示を更新する"""
-    if timer.is_active and timer.start_time is not None:
-        elapsed_time = time.time() - timer.start_time - timer.total_pause_time
-        if timer.pause_time:
-            elapsed_time -= time.time() - timer.pause_time
-        remaining_time = max(timer.duration - elapsed_time, 0)
-        minutes, seconds = divmod(int(remaining_time), 60)
-        timer_label.config(text=f"{minutes:02d}:{seconds:02d}")
-        if remaining_time > 0:
-            root.after(1000, update_timer)
-        else:
-            timer.is_active = False
-            messagebox.showinfo("情報", "タイマーが終了しました")
-    else:
-        minutes, seconds = divmod(timer.duration, 60)
-        timer_label.config(text=f"{minutes:02d}:{seconds:02d}")
-
-def update_current_time():
-    """現在時刻を更新する"""
-    JST = timezone(timedelta(hours=+9), 'JST')
-    current_time = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
-    current_time_label.config(text=f"現在時刻: {current_time}")
-    root.after(1000, update_current_time)
-
-def toggle_sync_with_video():
-    """動画同期オプションを切り替える"""
-    timer.sync_with_video = sync_var.get()
-    logging.info(f"動画同期オプションが{'有効' if timer.sync_with_video else '無効'}になりました")
-
-def on_closing():
-    """アプリケーション終了時の処理"""
-    global driver
-    if driver:
-        driver.quit()
-    root.quit()
-
-# GUIの設定
-root = tk.Tk()
-root.title("ポモドーロタイマー")
-root.protocol("WM_DELETE_WINDOW", on_closing)
-
-frame = ttk.Frame(root, padding="10")
-frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-
-timer_label = ttk.Label(frame, text="25:00", font=("Helvetica", 48))
-timer_label.grid(row=0, column=0, columnspan=4, pady=10)
-
-current_time_label = ttk.Label(frame, text="", font=("Helvetica", 12))
-current_time_label.grid(row=1, column=0, columnspan=4, pady=5)
-
-start_button = ttk.Button(frame, text="スタート", command=start_timer)
-start_button.grid(row=2, column=0, pady=5)
-
-stop_button = ttk.Button(frame, text="ストップ", command=stop_timer)
-stop_button.grid(row=2, column=1, pady=5)
-
-pause_button = ttk.Button(frame, text="一時停止", command=pause_timer)
-pause_button.grid(row=2, column=2, pady=5)
-
-resume_button = ttk.Button(frame, text="再開", command=resume_timer)
-resume_button.grid(row=2, column=3, pady=5)
-
-duration_label = ttk.Label(frame, text="タイマー時間（分）:")
-duration_label.grid(row=3, column=0, pady=5)
-
-duration_entry = ttk.Entry(frame, width=10)
-duration_entry.insert(0, "25")
-duration_entry.grid(row=3, column=1, pady=5)
-
-set_button = ttk.Button(frame, text="設定", command=set_timer)
-set_button.grid(row=3, column=2, columnspan=2, pady=5)
-
-url_label = ttk.Label(frame, text="YouTube URL:")
-url_label.grid(row=4, column=0, pady=5)
-
-url_entry = ttk.Entry(frame, width=40)
-url_entry.grid(row=4, column=1, columnspan=2, pady=5)
-
-play_button = ttk.Button(frame, text="動画再生", command=play_video)
-play_button.grid(row=4, column=3, pady=5)
-
-sync_var = tk.BooleanVar()
-sync_checkbox = ttk.Checkbutton(frame, text="動画と同期", variable=sync_var, command=toggle_sync_with_video)
-sync_checkbox.grid(row=5, column=0, columnspan=4, pady=5)
-
-# コピーアンドペースト機能を有効にする
-url_entry.bind('<Control-v>', lambda e: 'break')  # デフォルトの動作を無効化
-url_entry.bind('<Control-V>', lambda e: 'break') # 大文字のVも対応
-copy_button = ttk.Button(frame, text="コピー", command=lambda: root.clipboard_clear())
-def paste(event):
-    url_entry.delete(0, tk.END)
-    url_entry.insert(tk.INSERT, root.clipboard_get())
-
-url_entry.bind('<Control-v>', paste)
-url_entry.bind('<Control-V>', paste)
-
-update_current_time()
-
-root.mainloop()
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = PomodoroApp(root)
+    root.protocol("WM_DELETE_WINDOW", app.on_closing)
+    root.mainloop()
