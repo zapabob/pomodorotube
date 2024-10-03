@@ -23,7 +23,7 @@ Pomodoro TubeはPythonで開発されたポモドーロテクニック用のタ�
 
 
 
-git clone https://github.com/yourusername/pomodoro_tube.git
+git clone https://github.com/zapabob/pomodoro_tube.git
 cd pomodoro_tube
 
 
