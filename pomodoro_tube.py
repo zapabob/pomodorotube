@@ -20,6 +20,7 @@ import uvicorn
 import aiofiles
 import logging
 import re
+import threading
 
 # ロギングの設定
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -34,15 +35,21 @@ async def handle_callback(code: str = None):
     if code:
         # コードを使って認証処理を行う
         return "認証が完了しました。このページを閉じてアプリに戻ってください。"
-    return "エラーが発生しました。"
+    return "エラーが発生しまた。"
 
 async def start_local_server():
     config = uvicorn.Config(app, host="127.0.0.1", port=8000)
     server = uvicorn.Server(config)
     await server.serve()
 
-# メインアプリケーションのコード内で呼び出す
-asyncio.ensure_future(start_local_server())
+def run_async_server():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(start_local_server())
+
+# 別スレッドでサーバーを起動
+server_thread = threading.Thread(target=run_async_server, daemon=True)
+server_thread.start()
 
 class YouTubeLoader(QThread):
     finished = pyqtSignal(str)
@@ -52,80 +59,51 @@ class YouTubeLoader(QThread):
         super().__init__()
         self.url = url
 
+    @staticmethod
+    def extract_video_id(url):
+        patterns = [
+            r'(?:v=|\/)([0-9A-Za-z_-]{11}).*',
+            r'(?:youtu\.be\/)([0-9A-Za-z_-]{11})',
+            r'(?:embed\/)([0-9A-Za-z_-]{11})',
+            r'^([0-9A-Za-z_-]{11})$'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, url)
+            if match:
+                return match.group(1)
+        return None
+
     def run(self):
         try:
             video_id = self.extract_video_id(self.url)
             if video_id:
-                embed_url = f"https://www.youtube.com/embed/{video_id}"
+                embed_url = f"https://www.youtube.com/embed/{video_id}?autoplay=1&controls=1&enablejsapi=1"
                 self.finished.emit(embed_url)
             else:
-                self.error.emit("無効なYouTube URLです")
+                self.error.emit("無効なYouTube URL")
         except Exception as e:
             self.error.emit(str(e))
-
-    @staticmethod
-    def extract_video_id(url):
-        match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11}).*", url)
-        return match.group(1) if match else None
 
 class PomodoroWorker(QThread):
     tick = pyqtSignal(int)
     finished = pyqtSignal()
 
-    def __init__(self, duration):
+    def __init__(self, time_left):
         super().__init__()
-        self.duration = duration
-        self.is_running = True
+        self.time_left = time_left
+        self.running = True
 
     def run(self):
-        while self.duration > 0 and self.is_running:
-            self.tick.emit(self.duration)
-            self.msleep(1000)  # 1秒待機
-            self.duration -= 1
-        self.finished.emit()
+        while self.time_left > 0 and self.running:
+            self.tick.emit(self.time_left)
+            self.time_left -= 1
+            self.msleep(1000)
+        if self.running:
+            self.finished.emit()
 
     def stop(self):
-        self.is_running = False
-
-class CircularProgressBar(QtWidgets.QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.value = 0
-        self.width = 200
-        self.height = 200
-        self.progress_width = 10
-        self.progress_color = QColor(0, 255, 0)
-        self.max_value = 100
-        self.font_size = 12
-        self.suffix = "%"
-        self.text_color = QColor(0, 0, 0)
-        self.setFixedSize(self.width, self.height)
-
-    def set_value(self, value):
-        self.value = value
-        self.update()
-
-    def paintEvent(self, event):
-        width = self.width - self.progress_width
-        height = self.height - self.progress_width
-        value = self.value * 360
-
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.translate(self.width / 2, self.height / 2)
-        painter.rotate(270)
-
-        painter.setPen(QtCore.Qt.NoPen)
-        painter.setBrush(QtGui.QBrush(self.progress_color))
-        path = QPainterPath()
-        path.arcMoveTo(-width / 2, -height / 2, width, height, 0)
-        path.arcTo(-width / 2, -height / 2, width, height, 0, -value)
-        painter.drawPath(path)
-
-        painter.setPen(QtGui.QPen(self.text_color))
-        painter.setFont(QFont('Segoe UI', self.font_size))
-        painter.rotate(-270)
-        painter.drawText(QtCore.QRect(-50, -50, 100, 100), QtCore.Qt.AlignCenter, f"{int(self.value * 100)}{self.suffix}")
+        self.running = False
 
 class PomodoroTimer(QtWidgets.QMainWindow):
     def __init__(self):
@@ -196,54 +174,110 @@ class PomodoroTimer(QtWidgets.QMainWindow):
         self.layout.addWidget(self.notion_button)
 
     def setup_youtube_player(self):
-        # カスタムプロファイルを作成
-        self.profile = QWebEngineProfile("YouTubeProfile")
-        self.profile.setPersistentCookiesPolicy(QWebEngineProfile.ForcePersistentCookies)
-        self.profile.setPersistentStoragePath("./youtube_data")  # 永続的なストレージパスを設定
+        try:
+            # WebViewの設定
+            self.web_view = QWebEngineView(self)
+            
+            # 基本的な設定を有効化
+            settings = self.web_view.settings()
+            settings.setAttribute(QWebEngineSettings.PluginsEnabled, True)
+            settings.setAttribute(QWebEngineSettings.JavascriptEnabled, True)
+            settings.setAttribute(QWebEngineSettings.LocalStorageEnabled, True)
+            settings.setAttribute(QWebEngineSettings.LocalContentCanAccessRemoteUrls, True)
+            settings.setAttribute(QWebEngineSettings.AutoLoadImages, True)
+            settings.setAttribute(QWebEngineSettings.WebGLEnabled, True)
 
-        # WebViewの設定
-        self.web_view = QWebEngineView()
-        page = QWebEnginePage(self.profile, self.web_view)
-        self.web_view.setPage(page)
+            # サイズ設定
+            self.web_view.setMinimumSize(400, 300)
+            self.layout.addWidget(self.web_view)
 
-        # 必要な設定を有効化
-        settings = self.web_view.settings()
-        settings.setAttribute(QWebEngineSettings.PluginsEnabled, True)
-        settings.setAttribute(QWebEngineSettings.JavascriptEnabled, True)
-        settings.setAttribute(QWebEngineSettings.LocalStorageEnabled, True)
-        settings.setAttribute(QWebEngineSettings.LocalContentCanAccessRemoteUrls, True)
-
-        # YouTubeのURLを設定（ここではホームページを表示）
-        youtube_url = "https://www.youtube.com"
-        self.web_view.setUrl(QUrl(youtube_url))
-
-        self.layout.addWidget(self.web_view)
+        except Exception as e:
+            logging.error(f"YouTube プレイヤーの設定中にエラー: {e}")
+            raise
 
     def setup_youtube_controls(self):
+        # YouTube URL入力フィールド
         self.youtube_url_input = QtWidgets.QLineEdit()
         self.youtube_url_input.setPlaceholderText("YouTubeのURLを入力してください")
         self.layout.addWidget(self.youtube_url_input)
 
-        button_layout = QtWidgets.QHBoxLayout()
+        # コントロールボタンのレイアウト
+        control_layout = QtWidgets.QHBoxLayout()
 
+        # 貼り付けボタン
         self.paste_button = QtWidgets.QPushButton("貼り付け")
         self.paste_button.clicked.connect(self.paste_url)
-        button_layout.addWidget(self.paste_button)
+        control_layout.addWidget(self.paste_button)
 
-        self.clear_button = QtWidgets.QPushButton("クリア")
-        self.clear_button.clicked.connect(self.clear_url)
-        button_layout.addWidget(self.clear_button)
-
+        # 読み込みボタン
         self.load_button = QtWidgets.QPushButton("読み込み")
         self.load_button.clicked.connect(self.load_youtube_video)
-        button_layout.addWidget(self.load_button)
+        control_layout.addWidget(self.load_button)
 
-        self.loop_button = QtWidgets.QPushButton("ループ再生")
-        self.loop_button.setCheckable(True)
-        self.loop_button.clicked.connect(self.toggle_loop)
-        button_layout.addWidget(self.loop_button)
+        self.layout.addLayout(control_layout)
 
-        self.layout.addLayout(button_layout)
+    def load_youtube_video(self):
+        try:
+            url = self.youtube_url_input.text()
+            if url:
+                video_id = YouTubeLoader.extract_video_id(url)
+                if video_id:
+                    html = f'''
+                    <html><body style="margin:0">
+                        <div id="player"></div>
+                        <script src="https://www.youtube.com/iframe_api"></script>
+                        <script>
+                            var player;
+                            function onYouTubeIframeAPIReady() {{
+                                player = new YT.Player('player', {{
+                                    height: '100%',
+                                    width: '100%',
+                                    videoId: '{video_id}',
+                                    playerVars: {{
+                                        'autoplay': 1,
+                                        'controls': 1
+                                    }},
+                                    events: {{
+                                        'onReady': onPlayerReady
+                                    }}
+                                }});
+                            }}
+                            function onPlayerReady(event) {{
+                                event.target.playVideo();
+                            }}
+                        </script>
+                    </body></html>
+                    '''
+                    self.web_view.setHtml(html)
+                else:
+                    QtWidgets.QMessageBox.warning(self, "エラー", "無効なYouTube URLです")
+        except Exception as e:
+            logging.error(f"動画の読み込み中にエラー: {e}")
+            QtWidgets.QMessageBox.warning(self, "エラー", f"動画の読み込みに失敗: {e}")
+
+    def paste_url(self):
+        clipboard = QtWidgets.QApplication.clipboard()
+        self.youtube_url_input.setText(clipboard.text())
+
+    def check_video_status(self):
+        # 動画の状態を確認するJavaScriptを修正
+        self.web_view.page().runJavaScript("""
+            (function() {
+                var video = document.querySelector('video');
+                if (video) {
+                    return {
+                        'ended': video.ended,
+                        'currentTime': video.currentTime,
+                        'duration': video.duration
+                    };
+                }
+                return null;
+            })();
+        """, self.handle_video_status)
+
+    def handle_video_status(self, result):
+        if result:
+            logging.info(f"Video status: {result}")
 
     def setup_timers(self):
         self.time_update_timer = QTimer()
@@ -341,10 +375,21 @@ class PomodoroTimer(QtWidgets.QMainWindow):
 
     def connect_to_notion(self):
         try:
-            client_id = "あなたのNotion Client ID"
-            redirect_uri = "http://localhost:8000/notion/callback"
-            auth_url = f"https://api.notion.com/v1/oauth/authorize?client_id={client_id}&redirect_uri={redirect_uri}&response_type=code"
-            webbrowser.open(auth_url)
+            # Client ID入力用のダイアログを作成
+            client_id, ok = QtWidgets.QInputDialog.getText(
+                self,
+                "Notion連携",
+                "Notion Client IDを入力してください：",
+                QtWidgets.QLineEdit.Normal
+            )
+            
+            if ok and client_id:
+                redirect_uri = "http://localhost:8000/notion/callback"
+                auth_url = f"https://api.notion.com/v1/oauth/authorize?client_id={client_id}&redirect_uri={redirect_uri}&response_type=code"
+                webbrowser.open(auth_url)
+            else:
+                QtWidgets.QMessageBox.warning(self, "警告", "Client IDが入力されていません。")
+            
         except Exception as e:
             logging.error(f"Notionへの接続に失敗しました: {e}")
             QtWidgets.QMessageBox.warning(self, "エラー", f"Notionへの接続に失敗しました: {e}")
@@ -380,36 +425,27 @@ class PomodoroTimer(QtWidgets.QMainWindow):
             raise HTTPException(status_code=500, detail=f"設定の保存に失敗しました: {e}")
 
     def closeEvent(self, event):
-        self.stop_timer()
-        super().closeEvent(event)
-
-    def paste_url(self):
-        clipboard = QtWidgets.QApplication.clipboard()
-        self.youtube_url_input.setText(clipboard.text())
-
-    def clear_url(self):
-        self.youtube_url_input.clear()
-
-    def load_youtube_video(self):
-        url = self.youtube_url_input.text()
-        if url:
-            # 動画IDを抽出
-            video_id = self.extract_video_id(url)
-            if video_id:
-                embed_url = f"https://www.youtube.com/embed/{video_id}"
-                self.web_view.setUrl(QUrl(embed_url))
-            else:
-                QtWidgets.QMessageBox.warning(self, "エラー", "無効なYouTube URLです")
-
-    @staticmethod
-    def extract_video_id(url):
-        import re
-        match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11}).*", url)
-        return match.group(1) if match else None
-
-    def toggle_loop(self):
-        is_looping = self.loop_button.isChecked()
-        self.web_view.page().runJavaScript(f"document.getElementsByTagName('video')[0].loop = {str(is_looping).lower()};")
+        # プロファイルとリソースの適切なクリーンアップ
+        try:
+            self.stop_timer()
+            if hasattr(self, 'video_check_timer'):
+                self.video_check_timer.stop()
+            
+            # WebEngineViewのクリーンアップ
+            if hasattr(self, 'web_view'):
+                self.web_view.page().deleteLater()
+                self.web_view.deleteLater()
+                self.web_view = None
+            
+            # プロファイルのクリーンアップ
+            if hasattr(self, 'profile'):
+                self.profile.deleteLater()
+                self.profile = None
+                
+        except Exception as e:
+            logging.error(f"クリーンアップ中にエラーが発生: {e}")
+        finally:
+            super().closeEvent(event)
 
 if __name__ == '__main__':
     try:
@@ -418,6 +454,6 @@ if __name__ == '__main__':
         timer.show()
         sys.exit(app.exec_())
     except Exception as e:
-        logging.critical(f"アプリケーションの実行中に致命的なエラーが発生しました: {e}")
+        logging.critical(f"アプリケーションの実行中にエラーが発生しました: {e}")
         QtWidgets.QMessageBox.critical(None, "致命的なエラー", f"アプリケーションの実行中にエラーが発生しました: {e}")
         sys.exit(1)
